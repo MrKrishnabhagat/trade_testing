@@ -62,8 +62,8 @@ REPORTS_DIR = Path("reports")
 REPORTS_DIR.mkdir(exist_ok=True)
 
 # Environment Variables with defaults
-API_KEY = os.getenv("KITE_API_KEY", "")
-ACCESS_TOKEN = os.getenv("KITE_ACCESS_TOKEN", "")
+API_KEY = os.getenv("API_KEY", "")
+ACCESS_TOKEN = os.getenv("ACCESS_TOKEN", "")
 TRADING_CAPITAL = float(os.getenv("TRADING_CAPITAL", "10000"))  # Default ₹1,00,000
 LIVE_TRADING_MODE = os.getenv("LIVE_TRADING_MODE", "false").lower() == "true"
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
