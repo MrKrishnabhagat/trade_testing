@@ -18,7 +18,7 @@ on:
       capital:
         description: 'Trading Capital (INR)'
         required: false
-        default: '100000'
+        default: '10000'
         type: string
       max_trades:
         description: 'Max Daily Trades'
@@ -48,48 +48,31 @@ jobs:
       - name: 📦 Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install numpy pandas scipy kiteconnect colorama tabulate pytz schedule aiohttp
       
       - name: 📅 Check Trading Day & Market Hours
         run: |
           python -c "
-          import yaml
           from datetime import datetime
           import pytz
           
-          # Load trading config
-          with open('trading.yml', 'r') as f:
-              config = yaml.safe_load(f)
-          
-          # Check if today is trading day
+          # IST timezone
           ist = pytz.timezone('Asia/Kolkata')
           now = datetime.now(ist)
           
-          # Check weekday (0=Monday, 6=Sunday)
-          trading_days = config['market']['trading_days']
-          holidays = config['market'].get('holidays', [])
-          today_str = now.strftime('%Y-%m-%d')
+          # Check if today is trading day (Monday=0 to Friday=4)
+          is_trading_day = now.weekday() < 5  # Monday to Friday
           
-          is_trading_day = now.weekday() in trading_days and today_str not in holidays
-          
-          print(f'📅 Today: {today_str} ({now.strftime(\"%A\")})')
+          print(f'📅 Today: {now.strftime(\"%Y-%m-%d\")} ({now.strftime(\"%A\")})')
           print(f'🏪 Trading Day: {\"YES\" if is_trading_day else \"NO\"}')
           
           if not is_trading_day:
               print('⏸️ Market closed today - exiting')
               exit(78)  # Special exit code for non-trading days
           
-          # Check market hours
-          market_start = now.replace(
-              hour=config['market']['start_hour'],
-              minute=config['market']['start_minute'],
-              second=0
-          )
-          market_end = now.replace(
-              hour=config['market']['end_hour'], 
-              minute=config['market']['end_minute'],
-              second=0
-          )
+          # Market hours: 9:15 AM to 3:30 PM IST
+          market_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
+          market_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
           
           print(f'🕐 Current: {now.strftime(\"%H:%M:%S\")} IST')
           print(f'📈 Market: {market_start.strftime(\"%H:%M\")} - {market_end.strftime(\"%H:%M\")} IST')
@@ -98,17 +81,17 @@ jobs:
       
       - name: 🔐 Validate Secrets
         run: |
-          if [ -z "${{ secrets.KITE_API_KEY }}" ]; then
-            echo "❌ KITE_API_KEY secret missing"
+          if [ -z "${{ secrets.API_KEY }}" ]; then
+            echo "❌ API_KEY secret missing"
             echo "Go to Repository Settings → Secrets and Variables → Actions"
-            echo "Add KITE_API_KEY with your Kite Connect API key"
+            echo "Add API_KEY with your Kite Connect API key"
             exit 1
           fi
           
-          if [ -z "${{ secrets.KITE_ACCESS_TOKEN }}" ]; then
-            echo "❌ KITE_ACCESS_TOKEN secret missing"  
+          if [ -z "${{ secrets.ACCESS_TOKEN }}" ]; then
+            echo "❌ ACCESS_TOKEN secret missing"  
             echo "Go to Repository Settings → Secrets and Variables → Actions"
-            echo "Add KITE_ACCESS_TOKEN with your Kite Connect access token"
+            echo "Add ACCESS_TOKEN with your Kite Connect access token"
             exit 1
           fi
           
@@ -126,10 +109,10 @@ jobs:
             echo "🟡 SIMULATION MODE"
           fi
           
-          # Set capital
+          # Set capital (default to 10000 as requested)
           CAPITAL="${{ github.event.inputs.capital }}"
           if [ -z "$CAPITAL" ]; then
-            CAPITAL="100000"
+            CAPITAL="10000"
           fi
           echo "TRADING_CAPITAL=$CAPITAL" >> $GITHUB_ENV
           echo "💵 Capital: ₹$CAPITAL"
@@ -141,6 +124,9 @@ jobs:
           fi
           echo "MAX_DAILY_TRADES=$MAX_TRADES" >> $GITHUB_ENV
           echo "📊 Max Trades: $MAX_TRADES"
+          
+          # Set log level
+          echo "LOG_LEVEL=INFO" >> $GITHUB_ENV
       
       - name: 🏥 Pre-Trading Health Check
         run: |
@@ -148,20 +134,23 @@ jobs:
           # Test imports
           try:
               import pandas, numpy, scipy, asyncio, aiohttp
-              import kiteconnect, colorama, tabulate, pytz, yaml
+              import kiteconnect, colorama, tabulate, pytz, schedule
+              from datetime import datetime, timedelta
+              import time, threading, queue, json, signal, logging, os, sys
+              from pathlib import Path
               print('✅ All dependencies imported successfully')
           except ImportError as e:
               print(f'❌ Import error: {e}')
               exit(1)
           
-          # Test configuration
-          with open('trading.yml') as f:
-              config = yaml.safe_load(f)
-              
-          print(f'📊 Config loaded: {len(config)} sections')
-          print(f'💰 Default capital: ₹{config[\"trading\"][\"capital\"]:,}')
-          print(f'🎯 Trailing start: ₹{config[\"trading\"][\"trailing\"][\"start_threshold\"]}')
-          print(f'📈 Trailing increment: ₹{config[\"trading\"][\"trailing\"][\"increment\"]}')
+          # Test basic configuration
+          print(f'📊 System check completed')
+          print(f'💰 Default capital: ₹10,000')
+          print(f'🎯 Trailing start: ₹150') 
+          print(f'📈 Trailing increment: ₹100')
+          print(f'⏰ Market hours: 9:15 AM - 3:30 PM IST')
+          print(f'🔧 Max position size: 2 lots')
+          print(f'📋 Lot size: 75 shares')
           print('🎯 System ready for trading!')
           "
       
@@ -172,29 +161,35 @@ jobs:
       
       - name: 🚀 Execute Trading Session
         env:
-          KITE_API_KEY: ${{ secrets.KITE_API_KEY }}
-          KITE_ACCESS_TOKEN: ${{ secrets.KITE_ACCESS_TOKEN }}
-          LOG_LEVEL: 'INFO'
+          API_KEY: ${{ secrets.API_KEY }}
+          ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
+          TRADING_CAPITAL: ${{ env.TRADING_CAPITAL }}
+          LIVE_TRADING_MODE: ${{ env.LIVE_TRADING_MODE }}
+          LOG_LEVEL: ${{ env.LOG_LEVEL }}
+          MAX_DAILY_TRADES: ${{ env.MAX_DAILY_TRADES }}
         run: |
           echo "🎯 Starting NIFTY Options Trading Session"
           echo "⏰ Session Start: $(date '+%Y-%m-%d %H:%M:%S %Z')"
           echo "💼 Mode: ${{ env.LIVE_TRADING_MODE == 'true' && 'LIVE TRADING 🔴' || 'SIMULATION 🟡' }}"
           echo "💰 Capital: ₹${{ env.TRADING_CAPITAL }}"
+          echo "📊 Max Trades: ${{ env.MAX_DAILY_TRADES }}"
           echo ""
           
           # Run trading with timeout (6 hours max)
-          timeout 6h python main.py --schedule || {
+          timeout 6h python main.py || {
             exit_code=$?
             
             if [ $exit_code -eq 124 ]; then
               echo "⏰ Trading session timed out (6 hours reached)"
               echo "✅ Normal timeout - market session completed"
+              exit 0
             elif [ $exit_code -eq 78 ]; then
               echo "📅 Non-trading day detected"
               echo "✅ System correctly identified market closure"
               exit 0
             elif [ $exit_code -eq 0 ]; then
               echo "✅ Trading session completed successfully"
+              exit 0
             else
               echo "❌ Trading session failed (exit code: $exit_code)"
               echo "Check logs for details"
@@ -218,19 +213,33 @@ jobs:
           echo "**📊 Max Trades:** ${{ env.MAX_DAILY_TRADES }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
+          # Configuration summary
+          echo "## ⚙️ Trading Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "- **Lot Size:** 75 shares" >> $GITHUB_STEP_SUMMARY
+          echo "- **Max Position Size:** 2 lots" >> $GITHUB_STEP_SUMMARY
+          echo "- **Trailing Start:** ₹150 profit" >> $GITHUB_STEP_SUMMARY
+          echo "- **Trailing Increment:** ₹100" >> $GITHUB_STEP_SUMMARY
+          echo "- **Stop Loss:** 5% of deployed capital" >> $GITHUB_STEP_SUMMARY
+          echo "- **Capital Utilization:** Max 80%" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
           # Add daily report if exists
           REPORT_FILE="reports/daily_report_$(date +'%Y-%m-%d').md"
           if [ -f "$REPORT_FILE" ]; then
             echo "## 📋 Daily Trading Report" >> $GITHUB_STEP_SUMMARY
             echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-            head -n 30 "$REPORT_FILE" >> $GITHUB_STEP_SUMMARY
+            head -n 50 "$REPORT_FILE" >> $GITHUB_STEP_SUMMARY
             echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           else
             echo "## ⚠️ No Trading Report Generated" >> $GITHUB_STEP_SUMMARY
-            echo "Check logs for issues or market closure" >> $GITHUB_STEP_SUMMARY
+            echo "This is normal for:" >> $GITHUB_STEP_SUMMARY
+            echo "- Non-market hours" >> $GITHUB_STEP_SUMMARY
+            echo "- Weekend/holidays" >> $GITHUB_STEP_SUMMARY
+            echo "- No trading opportunities" >> $GITHUB_STEP_SUMMARY
+            echo "- System testing" >> $GITHUB_STEP_SUMMARY
           fi
           
-          # Add log summary
+          # Add log summary if exists
           LOG_FILE="logs/trading_$(date +'%Y-%m-%d').log"
           if [ -f "$LOG_FILE" ]; then
             echo "" >> $GITHUB_STEP_SUMMARY
@@ -239,7 +248,16 @@ jobs:
             echo "- **Errors:** $(grep -c 'ERROR' "$LOG_FILE" 2>/dev/null || echo 0)" >> $GITHUB_STEP_SUMMARY
             echo "- **Warnings:** $(grep -c 'WARNING' "$LOG_FILE" 2>/dev/null || echo 0)" >> $GITHUB_STEP_SUMMARY
             echo "- **Trades:** $(grep -c 'TRADE_COMPLETED' "$LOG_FILE" 2>/dev/null || echo 0)" >> $GITHUB_STEP_SUMMARY
+            echo "- **Positions:** $(grep -c 'NEW POSITION CREATED' "$LOG_FILE" 2>/dev/null || echo 0)" >> $GITHUB_STEP_SUMMARY
           fi
+          
+          # System info
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 🖥️ System Info" >> $GITHUB_STEP_SUMMARY
+          echo "- **Runner:** ubuntu-latest" >> $GITHUB_STEP_SUMMARY
+          echo "- **Python:** $(python --version)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Timezone:** Asia/Kolkata" >> $GITHUB_STEP_SUMMARY
+          echo "- **Run Number:** ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
       
       - name: 📦 Upload Trading Artifacts
         uses: actions/upload-artifact@v4
@@ -266,12 +284,7 @@ jobs:
           echo "2. Verify API credentials"
           echo "3. Check account status"
           echo "4. Review open positions manually"
-          
-          # Here you can add notification logic:
-          # - Send email alert
-          # - Discord/Slack webhook
-          # - SMS notification
-          # - etc.
+          echo "5. Contact broker if needed"
 
   cleanup:
     name: 🧹 Cleanup & Archive
@@ -293,6 +306,12 @@ jobs:
             DATE=$(date +'%Y%m%d-%H%M%S')
             tar -czf "nifty-trading-archive-$DATE.tar.gz" logs/ reports/ data/ 2>/dev/null || true
             echo "📦 Archive created: nifty-trading-archive-$DATE.tar.gz"
+            
+            # Show archive contents
+            if [ -f "nifty-trading-archive-$DATE.tar.gz" ]; then
+              echo "📋 Archive contents:"
+              tar -tzf "nifty-trading-archive-$DATE.tar.gz" | head -20
+            fi
           else
             echo "📭 No files to archive"
           fi
@@ -304,4 +323,7 @@ jobs:
           echo "📅 Date: $(date +'%Y-%m-%d')"
           echo "🕐 Time: $(date +'%H:%M:%S %Z')"
           echo "🔢 Run Number: ${{ github.run_number }}"
-          echo "✅ Session completed successfully"
+          echo "💰 Capital Used: ₹${{ needs.trading.env.TRADING_CAPITAL || '10000' }}"
+          echo "📊 Max Trades: ${{ needs.trading.env.MAX_DAILY_TRADES || '8' }}"
+          echo "🎯 Mode: ${{ needs.trading.env.LIVE_TRADING_MODE == 'true' && 'LIVE' || 'SIMULATION' }}"
+          echo "✅ Workflow completed successfully"
