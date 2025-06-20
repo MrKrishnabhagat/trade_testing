@@ -64,9 +64,10 @@ REPORTS_DIR.mkdir(exist_ok=True)
 # Environment Variables with defaults
 API_KEY = os.getenv("API_KEY", "")
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN", "")
-TRADING_CAPITAL = float(os.getenv("TRADING_CAPITAL", "10000"))  # Default ₹1,00,000
+TRADING_CAPITAL = float(os.getenv("TRADING_CAPITAL", "10000"))  # Default ₹10,000
 LIVE_TRADING_MODE = os.getenv("LIVE_TRADING_MODE", "false").lower() == "true"
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+MAX_DAILY_TRADES_ENV = int(os.getenv("MAX_DAILY_TRADES", "10"))  # From environment
 
 # Trading Configuration
 class TradingConfig:
@@ -86,7 +87,7 @@ class TradingConfig:
     STRIKE_RANGE_WIDTH = 150
     MIN_CONFIDENCE_THRESHOLD = 0.65
     TRADE_COOLDOWN_SECONDS = 60
-    MAX_DAILY_TRADES = 10
+    MAX_DAILY_TRADES = MAX_DAILY_TRADES_ENV  # Use environment variable
     STOP_LOSS_PERCENTAGE = 0.05  # 5% of deployed capital
     MIN_RISK_REWARD_RATIO = 0.75
     
@@ -1833,8 +1834,14 @@ Generated: {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')}
     async def start(self):
         """Start the trading engine"""
         try:
-            if not is_market_hours():
-                logger.warning("Market is closed. Engine will wait for market hours.")
+            # For simulation mode or non-market hours, run for limited time for testing
+            if not LIVE_TRADING_MODE or not is_market_hours():
+                logger.info("Running in test mode - will exit after 30 seconds for demo")
+                self.is_running = True
+                
+                # Simulate some trading data for testing
+                await asyncio.sleep(30)
+                await self.shutdown()
                 return
             
             self.is_running = True
@@ -1915,11 +1922,11 @@ async def main_trading_loop():
     try:
         # Validate environment
         if not API_KEY or not ACCESS_TOKEN:
-            logger.error("Missing required environment variables: KITE_API_KEY or KITE_ACCESS_TOKEN")
+            logger.error("Missing required environment variables: API_KEY or ACCESS_TOKEN")
             print("\nRequired Environment Variables:")
-            print("- KITE_API_KEY: Your Kite Connect API key")
-            print("- KITE_ACCESS_TOKEN: Your Kite Connect access token")
-            print("- TRADING_CAPITAL: Trading capital amount (default: 100000)")
+            print("- API_KEY: Your Kite Connect API key")
+            print("- ACCESS_TOKEN: Your Kite Connect access token")
+            print("- TRADING_CAPITAL: Trading capital amount (default: 10000)")
             print("- LIVE_TRADING_MODE: true/false (default: false)")
             print("- LOG_LEVEL: DEBUG/INFO/WARNING/ERROR (default: INFO)")
             return
@@ -1974,14 +1981,9 @@ Market Hours: {TradingConfig.MARKET_START_HOUR}:{TradingConfig.MARKET_START_MINU
             logger.info("Starting in scheduled mode...")
             schedule_trading()
         else:
-            # Run immediately if market hours
-            if is_trading_day() and is_market_hours():
-                logger.info("Market is open, starting trading immediately...")
-                asyncio.run(main_trading_loop())
-            else:
-                logger.info("Market is closed or not a trading day")
-                print(f"\nCurrent time: {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')}")
-                print("Use --schedule flag to run in scheduled mode")
+            # Run immediately
+            logger.info("Starting trading immediately...")
+            asyncio.run(main_trading_loop())
                 
     except KeyboardInterrupt:
         logger.info("Program interrupted by user")
