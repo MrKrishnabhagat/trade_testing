@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 """
-NIFTY Options Intraday Trading System with Profit-Based Trailing Stops
-GitHub: https://github.com/yourusername/nifty-options-trader
+NIFTY Options Intraday Trading System - REAL-TIME SIMULATION MODE
+Uses live market data from KiteConnect API to test trading logic without placing actual orders
 
-Features:
-- Automated market hours trading (9:15 AM - 3:30 PM IST)
-- Profit-based trailing stops (₹150 start, ₹100 increments)
-- Comprehensive logging and trade reporting
-- Real-time stop loss monitoring
-- Conservative capital management
-- Detailed P&L tracking with brokerage deduction
-
-Author: Your Name
-Version: 2.0.0
-License: MIT
+🔧 SIMULATION FEATURES:
+1. ✅ REAL-TIME MARKET DATA: Live prices from KiteConnect API
+2. ✅ ORDER RECORDING: All orders logged instead of placed
+3. ✅ PROFIT-BASED TRAILING: Complete trailing stop logic testing
+4. ✅ FULL MARKET HOURS: Runs entire trading session (9:15 AM - 3:30 PM IST)
+5. ✅ COMPREHENSIVE REPORTING: Detailed logs and performance reports
+6. ✅ LIVE TESTING: Tests all logic with real market conditions
 """
 
 import os
@@ -24,26 +20,23 @@ from datetime import datetime, timedelta
 import time
 import threading
 import queue
-import asyncio
-import aiohttp
-import json
-import signal
-import logging
-from logging.handlers import RotatingFileHandler
 from collections import deque
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Tuple, Optional
-from pathlib import Path
-import pytz
-import schedule
-
-# Third-party imports
-from scipy.stats import norm, skewnorm
-from scipy.integrate import quad
-from kiteconnect import KiteConnect, KiteTicker
+import logging
+from logging.handlers import RotatingFileHandler
+from scipy.stats import norm
+import asyncio
+import json
+import signal
 from tabulate import tabulate
 import colorama
 from colorama import Fore, Back, Style
+from pathlib import Path
+import pytz
+
+# Third-party imports (only KiteConnect for market data)
+from kiteconnect import KiteConnect, KiteTicker
 import warnings
 
 # Initialize colorama and suppress warnings
@@ -53,42 +46,30 @@ warnings.filterwarnings("ignore")
 # Set timezone to IST
 IST = pytz.timezone('Asia/Kolkata')
 
-# Create logs directory
+# Create directories
 LOGS_DIR = Path("logs")
 LOGS_DIR.mkdir(exist_ok=True)
-
-# Create reports directory
-REPORTS_DIR = Path("reports")
+REPORTS_DIR = Path("reports") 
 REPORTS_DIR.mkdir(exist_ok=True)
 
-# Environment Variables with defaults
+# Environment Variables (from GitHub secrets)
 API_KEY = os.getenv("API_KEY", "")
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN", "")
-TRADING_CAPITAL = float(os.getenv("TRADING_CAPITAL", "10000"))  # Default ₹10,000
-LIVE_TRADING_MODE = os.getenv("LIVE_TRADING_MODE", "false").lower() == "true"
+TRADING_CAPITAL = float(os.getenv("TRADING_CAPITAL", "10000"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-MAX_DAILY_TRADES_ENV = int(os.getenv("MAX_DAILY_TRADES", "10"))  # From environment
+MAX_DAILY_TRADES_ENV = int(os.getenv("MAX_DAILY_TRADES", "10"))
 
 # Trading Configuration
 class TradingConfig:
-    """Trading configuration constants"""
-    
-    # Basic Settings
     LOT_SIZE = 75
-    BROKERAGE_PER_LOT = 40  # Per transaction (entry OR exit)
-    STT_RATE = 0.0001  # 0.01% STT on options
-    EXCHANGE_CHARGES_RATE = 0.0000345  # 0.00345% on turnover
-    GST_RATE = 0.18  # 18% GST on brokerage + charges
-    SEBI_CHARGES_RATE = 0.000001  # ₹1 per crore turnover
-    
-    # Trading Limits
+    BROKERAGE_PER_LOT = 40
     MIN_PROFIT_AFTER_BROKERAGE = 100
     MAX_POSITION_SIZE = 2
     STRIKE_RANGE_WIDTH = 150
     MIN_CONFIDENCE_THRESHOLD = 0.65
     TRADE_COOLDOWN_SECONDS = 60
-    MAX_DAILY_TRADES = MAX_DAILY_TRADES_ENV  # Use environment variable
-    STOP_LOSS_PERCENTAGE = 0.05  # 5% of deployed capital
+    MAX_DAILY_TRADES = MAX_DAILY_TRADES_ENV
+    STOP_LOSS_PERCENTAGE = 0.05
     MIN_RISK_REWARD_RATIO = 0.75
     
     # Profit-Based Trailing Configuration
@@ -96,13 +77,8 @@ class TradingConfig:
     TRAILING_STOP_INCREMENT = 100   # Trail in ₹100 increments
     
     # Capital Management
-    MAX_CAPITAL_UTILIZATION = 0.80  # Use max 80% of capital
-    FOCUS_MODE_THRESHOLD = 0.70     # Focus on existing trades at 70%
-    
-    # Processing Configuration
-    REALTIME_STOP_LOSS_MONITORING = True
-    SIGNAL_ANALYSIS_EVERY_N_TICKS = 5
-    UPDATE_FREQUENCY_SECONDS = 10
+    MAX_CAPITAL_UTILIZATION = 0.80
+    FOCUS_MODE_THRESHOLD = 0.70
     
     # Market Hours (IST)
     MARKET_START_HOUR = 9
@@ -110,14 +86,13 @@ class TradingConfig:
     MARKET_END_HOUR = 15
     MARKET_END_MINUTE = 30
     
-    # Logging Configuration
-    LOG_RETENTION_DAYS = 30
-    MAX_LOG_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+    # Real-time processing
+    REALTIME_STOP_LOSS_MONITORING = True
+    SIGNAL_ANALYSIS_EVERY_N_TICKS = 5
 
 
 class ColoredFormatter(logging.Formatter):
-    """Custom formatter with colors for console output"""
-    
+    """Custom formatter with colors"""
     COLORS = {
         'DEBUG': Fore.CYAN,
         'INFO': Fore.GREEN,
@@ -134,8 +109,6 @@ class ColoredFormatter(logging.Formatter):
 
 def setup_logging():
     """Setup comprehensive logging system"""
-    
-    # Create formatters
     console_formatter = ColoredFormatter(
         '%(asctime)s.%(msecs)03d [%(levelname)s] %(message)s',
         datefmt='%H:%M:%S'
@@ -146,11 +119,8 @@ def setup_logging():
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     
-    # Setup root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(getattr(logging, LOG_LEVEL))
-    
-    # Clear existing handlers
     root_logger.handlers.clear()
     
     # Console handler
@@ -159,46 +129,57 @@ def setup_logging():
     console_handler.setFormatter(console_formatter)
     root_logger.addHandler(console_handler)
     
-    # File handler - Main log
+    # File handler
     today = datetime.now(IST).strftime('%Y-%m-%d')
     main_log_file = LOGS_DIR / f"trading_{today}.log"
     
     file_handler = RotatingFileHandler(
-        main_log_file,
-        maxBytes=TradingConfig.MAX_LOG_FILE_SIZE,
-        backupCount=5,
-        encoding='utf-8'
+        main_log_file, maxBytes=50*1024*1024, backupCount=5, encoding='utf-8'
     )
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(file_formatter)
     root_logger.addHandler(file_handler)
     
-    # Trade-specific logger
-    trade_logger = logging.getLogger('trades')
-    trade_log_file = LOGS_DIR / f"trades_{today}.log"
+    # Order recording logger
+    order_logger = logging.getLogger('orders')
+    order_log_file = LOGS_DIR / f"orders_{today}.log"
     
-    trade_handler = RotatingFileHandler(
-        trade_log_file,
-        maxBytes=TradingConfig.MAX_LOG_FILE_SIZE,
-        backupCount=10,
-        encoding='utf-8'
+    order_handler = RotatingFileHandler(
+        order_log_file, maxBytes=50*1024*1024, backupCount=10, encoding='utf-8'
     )
-    trade_handler.setLevel(logging.INFO)
-    trade_handler.setFormatter(file_formatter)
-    trade_logger.addHandler(trade_handler)
-    trade_logger.setLevel(logging.INFO)
+    order_handler.setLevel(logging.INFO)
+    order_handler.setFormatter(file_formatter)
+    order_logger.addHandler(order_handler)
+    order_logger.setLevel(logging.INFO)
     
-    return logging.getLogger(__name__), trade_logger
+    return logging.getLogger(__name__), order_logger
+
+logger, order_logger = setup_logging()
 
 
-# Setup loggers
-logger, trade_logger = setup_logging()
+@dataclass
+class RecordedOrder:
+    """Structure for recording simulated orders"""
+    order_id: str
+    timestamp: datetime
+    symbol: str
+    transaction_type: str  # BUY/SELL
+    quantity: int
+    order_type: str  # LIMIT/SL/MARKET
+    price: float
+    trigger_price: Optional[float] = None
+    status: str = "PLACED"  # PLACED/EXECUTED/CANCELLED
+    execution_price: Optional[float] = None
+    execution_time: Optional[datetime] = None
+    reason: str = ""
+    
+    def to_dict(self) -> Dict:
+        return asdict(self)
 
 
 @dataclass
 class TradeReport:
     """Comprehensive trade report structure"""
-    
     trade_id: str
     symbol: str
     option_type: str
@@ -213,10 +194,6 @@ class TradeReport:
     # P&L Breakdown
     gross_pnl: float
     brokerage: float
-    stt: float
-    exchange_charges: float
-    gst: float
-    sebi_charges: float
     net_pnl: float
     
     # Trade Details
@@ -231,15 +208,18 @@ class TradeReport:
     holding_duration_minutes: float
     roi_percentage: float
     
+    # Order tracking
+    entry_order_id: str
+    exit_order_id: str
+    stop_order_ids: List[str]
+    
     def to_dict(self) -> Dict:
-        """Convert to dictionary for logging"""
         return asdict(self)
 
 
 @dataclass
 class MarketDepth:
-    """5-level market depth structure"""
-    
+    """Market depth structure"""
     timestamp: float
     bids: List[Tuple[float, int, int]]
     asks: List[Tuple[float, int, int]]
@@ -248,7 +228,7 @@ class MarketDepth:
     def spread(self) -> float:
         if self.bids and self.asks:
             return self.asks[0][0] - self.bids[0][0]
-        return float('inf')
+        return float("inf")
     
     @property
     def mid_price(self) -> float:
@@ -272,73 +252,61 @@ class MarketDepth:
         return bid_volume + ask_volume
 
 
-class TradingMetrics:
-    """Trading performance metrics calculator"""
+class TrendAnalyzer:
+    """Trend analysis for market direction"""
+    def __init__(self, lookback_periods=50):
+        self.price_history = deque(maxlen=lookback_periods)
+        self.volume_history = deque(maxlen=lookback_periods)
     
-    def __init__(self):
-        self.trades: List[TradeReport] = []
-        self.daily_pnl = 0
-        self.total_brokerage = 0
-        self.max_drawdown = 0
-        self.peak_capital = 0
+    def update(self, price: float, volume: int):
+        self.price_history.append(price)
+        self.volume_history.append(volume)
     
-    def add_trade(self, trade: TradeReport):
-        """Add completed trade to metrics"""
-        self.trades.append(trade)
-        self.daily_pnl += trade.net_pnl
-        self.total_brokerage += (trade.brokerage + trade.stt + 
-                                trade.exchange_charges + trade.gst + trade.sebi_charges)
-    
-    def calculate_metrics(self) -> Dict:
-        """Calculate comprehensive trading metrics"""
-        if not self.trades:
-            return {
-                'total_trades': 0,
-                'winning_trades': 0,
-                'losing_trades': 0,
-                'win_rate': 0,
-                'profit_factor': 0,
-                'avg_winner': 0,
-                'avg_loser': 0,
-                'largest_winner': 0,
-                'largest_loser': 0,
-                'net_pnl': 0,
-                'gross_pnl': 0,
-                'total_costs': 0,
-                'roi': 0
-            }
+    def get_trend_signal(self) -> Dict:
+        if len(self.price_history) < 20:
+            return {'trend': 'NEUTRAL', 'strength': 0, 'vwap': 0}
         
-        winning_trades = [t for t in self.trades if t.net_pnl > 0]
-        losing_trades = [t for t in self.trades if t.net_pnl <= 0]
+        prices = np.array(self.price_history)
+        volumes = np.array(self.volume_history)
         
-        total_gross_profit = sum(t.gross_pnl for t in winning_trades)
-        total_gross_loss = abs(sum(t.gross_pnl for t in losing_trades))
+        vwap = np.sum(prices * volumes) / np.sum(volumes) if np.sum(volumes) > 0 else prices[-1]
         
-        metrics = {
-            'total_trades': len(self.trades),
-            'winning_trades': len(winning_trades),
-            'losing_trades': len(losing_trades),
-            'win_rate': len(winning_trades) / len(self.trades) * 100,
-            'profit_factor': total_gross_profit / total_gross_loss if total_gross_loss > 0 else float('inf'),
-            'avg_winner': sum(t.net_pnl for t in winning_trades) / len(winning_trades) if winning_trades else 0,
-            'avg_loser': sum(t.net_pnl for t in losing_trades) / len(losing_trades) if losing_trades else 0,
-            'largest_winner': max((t.net_pnl for t in winning_trades), default=0),
-            'largest_loser': min((t.net_pnl for t in losing_trades), default=0),
-            'net_pnl': self.daily_pnl,
-            'gross_pnl': sum(t.gross_pnl for t in self.trades),
-            'total_costs': self.total_brokerage,
-            'roi': (self.daily_pnl / TRADING_CAPITAL * 100) if TRADING_CAPITAL > 0 else 0
+        x = np.arange(len(prices))
+        slope = np.polyfit(x, prices, 1)[0]
+        price_std = np.std(prices)
+        strength = abs(slope) / price_std if price_std > 0 else 0
+        
+        if slope > price_std * 0.01:
+            trend = 'BULLISH'
+        elif slope < -price_std * 0.01:
+            trend = 'BEARISH'
+        else:
+            trend = 'NEUTRAL'
+        
+        recent_volume = np.mean(volumes[-5:])
+        avg_volume = np.mean(volumes[:-5]) if len(volumes) > 5 else recent_volume
+        volume_ratio = recent_volume / avg_volume if avg_volume > 0 else 1
+        
+        if volume_ratio > 1.2:
+            strength *= 1.5
+        elif volume_ratio < 0.8:
+            strength *= 0.5
+        
+        return {
+            'trend': trend,
+            'strength': min(1.0, strength),
+            'vwap': vwap,
+            'current_vs_vwap': (prices[-1] - vwap) / vwap,
+            'volume_ratio': volume_ratio,
         }
-        
-        return metrics
 
 
 class Position:
-    """Enhanced Position class with comprehensive tracking"""
+    """Position class with profit-based trailing logic and order recording"""
     
     def __init__(self, symbol: str, side: str, entry_price: float, quantity: int, 
                  entry_time: datetime, option_type: str, strike: float, 
-                 expected_profit: float, deployed_capital: float):
+                 expected_profit: float, deployed_capital: float, order_recorder):
         
         self.trade_id = f"{datetime.now(IST).strftime('%Y%m%d')}_{int(time.time())}"
         self.symbol = symbol
@@ -350,6 +318,7 @@ class Position:
         self.strike = strike
         self.expected_profit = expected_profit
         self.deployed_capital = deployed_capital
+        self.order_recorder = order_recorder
         
         # Exit tracking
         self.exit_price = None
@@ -374,54 +343,15 @@ class Position:
         self.original_stop_reinforced = False
         
         # Order tracking
-        self.order_id = None
-        self.stop_loss_order_id = None
-        self.order_status = "PENDING"
-        self.is_position_verified = False
+        self.entry_order_id = None
+        self.stop_order_ids = []
+        self.exit_order_id = None
         
-        # Performance tracking
-        self.pnl_history = []
-        self.trailing_updates = []
-        
-        trade_logger.info(f"NEW POSITION CREATED: {self.trade_id} - {symbol} {side} {quantity}@{entry_price}")
-    
-    def calculate_all_charges(self, entry_price: float, exit_price: float, quantity: int) -> Dict[str, float]:
-        """Calculate all trading charges comprehensively"""
-        
-        turnover = (entry_price + exit_price) * quantity
-        
-        # Brokerage (fixed per lot)
-        num_lots = quantity / TradingConfig.LOT_SIZE
-        brokerage = TradingConfig.BROKERAGE_PER_LOT * 2 * num_lots  # Entry + Exit
-        
-        # STT (Securities Transaction Tax) - only on sell side for options
-        stt = exit_price * quantity * TradingConfig.STT_RATE
-        
-        # Exchange charges
-        exchange_charges = turnover * TradingConfig.EXCHANGE_CHARGES_RATE
-        
-        # SEBI charges
-        sebi_charges = turnover * TradingConfig.SEBI_CHARGES_RATE
-        
-        # GST on (brokerage + exchange charges + sebi charges)
-        taxable_amount = brokerage + exchange_charges + sebi_charges
-        gst = taxable_amount * TradingConfig.GST_RATE
-        
-        total_charges = brokerage + stt + exchange_charges + sebi_charges + gst
-        
-        return {
-            'brokerage': round(brokerage, 2),
-            'stt': round(stt, 2),
-            'exchange_charges': round(exchange_charges, 2),
-            'sebi_charges': round(sebi_charges, 2),
-            'gst': round(gst, 2),
-            'total_charges': round(total_charges, 2)
-        }
+        logger.info(f"NEW POSITION CREATED: {self.trade_id} - {symbol} {side} {quantity}@{entry_price}")
     
     def update_stops(self, stop_loss: float, target: float):
-        """Update stop loss and target with proper capital-based calculation"""
+        """Update stop loss and target"""
         if self.initial_stop is None:
-            # Stop loss = 5% of capital deployed in THIS trade
             stop_loss_amount = self.deployed_capital * TradingConfig.STOP_LOSS_PERCENTAGE
             stop_loss_per_share = stop_loss_amount / self.quantity
             self.initial_stop = max(
@@ -445,14 +375,11 @@ class Position:
         logger.info(f"  Target: ₹{self.target:.2f}")
         logger.info(f"  Stop: ₹{self.stop_loss:.2f}")
         logger.info(f"  Trailing starts at profit > ₹{TradingConfig.TRAILING_START_THRESHOLD}")
-        
-        trade_logger.info(f"STOPS_UPDATED: {self.trade_id} - Stop: {self.stop_loss:.2f}, Target: {self.target:.2f}")
     
     def round_price_for_order(self, price: float, is_buy: bool) -> float:
-        """Round price to 0.05 multiples for valid orders"""
+        """Round price to 0.05 multiples"""
         try:
             if not isinstance(price, (int, float)) or price <= 0:
-                logger.error(f"Invalid price for rounding: {price}")
                 return 0.05
             
             if is_buy:
@@ -460,15 +387,13 @@ class Position:
             else:
                 rounded_price = int((price + 0.049) / 0.05) * 0.05
             
-            final_price = max(0.05, round(rounded_price, 2))
-            return final_price
-            
+            return max(0.05, round(rounded_price, 2))
         except Exception as e:
             logger.error(f"Error rounding price {price}: {e}")
             return max(0.05, round(float(price), 2))
     
     def should_start_trailing(self, current_price: float) -> bool:
-        """Check if trailing should start based on profit threshold"""
+        """Check if trailing should start"""
         if self.side != "BUY" or not self.trailing_start_price:
             return False
         
@@ -478,12 +403,10 @@ class Position:
             if not self.is_trailing_stop_active:
                 logger.info(f"{Fore.GREEN}🎯 STARTING PROFIT-BASED TRAILING: {self.trade_id}")
                 logger.info(f"   Profit ₹{current_profit:.0f} >= ₹{TradingConfig.TRAILING_START_THRESHOLD}{Style.RESET_ALL}")
-                trade_logger.info(f"TRAILING_STARTED: {self.trade_id} - Profit: {current_profit:.0f}")
             return True
-        
         return False
     
-    def update_trailing_stop(self, current_price: float, kite_instance=None) -> bool:
+    def update_trailing_stop(self, current_price: float) -> bool:
         """Update trailing stop with profit-based logic"""
         try:
             if self.side != "BUY":
@@ -497,7 +420,6 @@ class Position:
                 self.target_removed = True
                 self.target = None
                 logger.info(f"{Fore.YELLOW}📈 TARGET REMOVED: {self.trade_id} - Letting position run{Style.RESET_ALL}")
-                trade_logger.info(f"TARGET_REMOVED: {self.trade_id}")
             
             # Calculate trailing level
             current_profit = (current_price - self.entry_price) * self.quantity
@@ -515,9 +437,7 @@ class Position:
                 logger.info(f"   Profit: ₹{current_profit:.0f}, Level: {trailing_level}")
                 logger.info(f"   Stop: ₹{target_stop_price:.2f}{Style.RESET_ALL}")
                 
-                trade_logger.info(f"INITIAL_TRAILING: {self.trade_id} - Level: {trailing_level}, Stop: {target_stop_price:.2f}")
-                
-                return self._place_trailing_stop_order(target_stop_price, kite_instance)
+                return self._record_trailing_stop_order(target_stop_price)
             
             # Update to next level
             if trailing_level > self.current_trailing_level:
@@ -529,9 +449,7 @@ class Position:
                 logger.info(f"   Level: {old_level} → {trailing_level}")
                 logger.info(f"   Stop: ₹{target_stop_price:.2f}{Style.RESET_ALL}")
                 
-                trade_logger.info(f"TRAILING_UPDATE: {self.trade_id} - Level: {old_level}->{trailing_level}, Stop: {target_stop_price:.2f}")
-                
-                return self._place_trailing_stop_order(target_stop_price, kite_instance)
+                return self._record_trailing_stop_order(target_stop_price)
             
             # Update max favorable price
             if current_price > self.max_favorable_price:
@@ -543,128 +461,101 @@ class Position:
             logger.error(f"Error updating trailing stop for {self.trade_id}: {e}")
             return False
     
-    def _place_trailing_stop_order(self, stop_price: float, kite_instance=None) -> bool:
-        """Place trailing stop order with proper error handling"""
+    def _record_trailing_stop_order(self, stop_price: float) -> bool:
+        """Record trailing stop order instead of placing it"""
         try:
-            if not kite_instance or not LIVE_TRADING_MODE:
-                return True
+            # Cancel previous stop order (record cancellation)
+            if self.stop_order_ids:
+                last_stop_id = self.stop_order_ids[-1]
+                cancel_order = RecordedOrder(
+                    order_id=f"CANCEL_{last_stop_id}",
+                    timestamp=datetime.now(IST),
+                    symbol=self.symbol,
+                    transaction_type="CANCEL",
+                    quantity=0,
+                    order_type="CANCEL",
+                    price=0,
+                    status="CANCELLED",
+                    reason="Replacing with new trailing stop"
+                )
+                self.order_recorder.record_order(cancel_order)
             
-            # Cancel existing stop order
-            if self.stop_loss_order_id:
-                try:
-                    kite_instance.cancel_order(variety="regular", order_id=self.stop_loss_order_id)
-                    logger.info(f"Cancelled old stop order: {self.stop_loss_order_id}")
-                except Exception as cancel_error:
-                    logger.warning(f"Could not cancel old stop: {cancel_error}")
-            
-            # Place new stop order
+            # Record new stop order
             rounded_stop_price = self.round_price_for_order(stop_price, is_buy=False)
             trigger_price = rounded_stop_price
             limit_price = rounded_stop_price - 0.05
             
-            try:
-                new_stop_order_id = kite_instance.place_order(
-                    variety="regular",
-                    exchange="NFO",
-                    tradingsymbol=self.symbol,
-                    transaction_type="SELL",
-                    quantity=self.quantity,
-                    product="MIS",
-                    order_type="SL",
-                    price=limit_price,
-                    trigger_price=trigger_price,
-                )
-                
-                self.stop_loss_order_id = new_stop_order_id
-                self.stop_loss = rounded_stop_price
-                self.original_stop_reinforced = False
-                
-                logger.info(f"{Fore.GREEN}✅ TRAILING STOP PLACED: {new_stop_order_id}{Style.RESET_ALL}")
-                trade_logger.info(f"TRAILING_STOP_PLACED: {self.trade_id} - OrderID: {new_stop_order_id}, Price: {rounded_stop_price:.2f}")
-                
-                return True
-                
-            except Exception as order_error:
-                logger.error(f"{Fore.RED}❌ TRAILING STOP FAILED: {order_error}{Style.RESET_ALL}")
-                
-                # Handle market price error
-                error_msg = str(order_error).lower()
-                if "market price" in error_msg and "less than" in error_msg:
-                    return self._handle_stop_price_error(kite_instance)
-                
-                return False
-                
-        except Exception as e:
-            logger.error(f"Error placing trailing stop for {self.trade_id}: {e}")
-            return False
-    
-    def _handle_stop_price_error(self, kite_instance) -> bool:
-        """Handle stop price error by reinforcing original stop"""
-        try:
-            logger.warning(f"{Fore.YELLOW}⚠️ MARKET PRICE ERROR: Reinforcing original stop for {self.trade_id}{Style.RESET_ALL}")
+            stop_order_id = f"SL_{self.trade_id}_{len(self.stop_order_ids)+1}"
             
-            original_trigger = self.round_price_for_order(self.original_stop, is_buy=False)
-            original_limit = original_trigger - 0.05
-            
-            fallback_order_id = kite_instance.place_order(
-                variety="regular",
-                exchange="NFO",
-                tradingsymbol=self.symbol,
+            stop_order = RecordedOrder(
+                order_id=stop_order_id,
+                timestamp=datetime.now(IST),
+                symbol=self.symbol,
                 transaction_type="SELL",
                 quantity=self.quantity,
-                product="MIS",
                 order_type="SL",
-                price=original_limit,
-                trigger_price=original_trigger,
+                price=limit_price,
+                trigger_price=trigger_price,
+                status="PLACED",
+                reason="Trailing stop loss"
             )
             
-            self.stop_loss_order_id = fallback_order_id
-            self.stop_loss = self.original_stop
-            self.trailing_stop_price = self.original_stop
-            self.original_stop_reinforced = True
+            self.order_recorder.record_order(stop_order)
+            self.stop_order_ids.append(stop_order_id)
+            self.stop_loss = rounded_stop_price
             
-            logger.info(f"{Fore.GREEN}✅ ORIGINAL STOP REINFORCED: {fallback_order_id}{Style.RESET_ALL}")
-            trade_logger.info(f"ORIGINAL_STOP_REINFORCED: {self.trade_id} - OrderID: {fallback_order_id}")
-            
+            logger.info(f"{Fore.GREEN}✅ TRAILING STOP RECORDED: {stop_order_id}{Style.RESET_ALL}")
             return True
             
-        except Exception as fallback_error:
-            logger.error(f"{Fore.RED}❌ FALLBACK STOP FAILED: {fallback_error}{Style.RESET_ALL}")
-            trade_logger.error(f"FALLBACK_STOP_FAILED: {self.trade_id} - Error: {fallback_error}")
+        except Exception as e:
+            logger.error(f"Error recording trailing stop order: {e}")
             return False
     
     def check_emergency_exit(self, current_price: float) -> bool:
         """Check if emergency exit is needed"""
         if self.side == "BUY" and current_price <= self.original_stop:
-            logger.error(f"{Fore.RED}🚨 EMERGENCY EXIT NEEDED: {self.trade_id}{Style.RESET_ALL}")
-            trade_logger.error(f"EMERGENCY_EXIT: {self.trade_id} - Price: {current_price:.2f}, Original Stop: {self.original_stop:.2f}")
+            logger.error(f"{Fore.RED}🚨 EMERGENCY EXIT: {self.trade_id} - Price ₹{current_price:.2f} <= Original Stop ₹{self.original_stop:.2f}{Style.RESET_ALL}")
             return True
         return False
     
     def close(self, exit_price: float, exit_time: datetime, exit_reason: str = "UNKNOWN") -> TradeReport:
-        """Close position and generate comprehensive trade report"""
-        
+        """Close position and generate trade report"""
         self.exit_price = exit_price
         self.exit_time = exit_time
         self.exit_reason = exit_reason
         
-        # Calculate gross P&L
+        # Calculate P&L
         if self.side == "BUY":
             gross_pnl = (exit_price - self.entry_price) * self.quantity
         else:
             gross_pnl = (self.entry_price - exit_price) * self.quantity
         
-        # Calculate all charges
-        charges = self.calculate_all_charges(self.entry_price, exit_price, self.quantity)
+        # Calculate brokerage
+        num_lots = self.quantity / TradingConfig.LOT_SIZE
+        total_brokerage = TradingConfig.BROKERAGE_PER_LOT * 2 * num_lots
+        net_pnl = gross_pnl - total_brokerage
         
-        # Calculate net P&L
-        net_pnl = gross_pnl - charges['total_charges']
-        
-        # Calculate holding duration
-        holding_duration = (exit_time - self.entry_time).total_seconds() / 60  # minutes
-        
-        # Calculate ROI
+        # Calculate metrics
+        holding_duration = (exit_time - self.entry_time).total_seconds() / 60
         roi_percentage = (net_pnl / self.deployed_capital) * 100 if self.deployed_capital > 0 else 0
+        
+        # Record exit order
+        exit_order_id = f"EXIT_{self.trade_id}"
+        exit_order = RecordedOrder(
+            order_id=exit_order_id,
+            timestamp=exit_time,
+            symbol=self.symbol,
+            transaction_type="SELL" if self.side == "BUY" else "BUY",
+            quantity=self.quantity,
+            order_type="LIMIT",
+            price=exit_price,
+            status="EXECUTED",
+            execution_price=exit_price,
+            execution_time=exit_time,
+            reason=exit_reason
+        )
+        self.order_recorder.record_order(exit_order)
+        self.exit_order_id = exit_order_id
         
         # Create trade report
         trade_report = TradeReport(
@@ -679,11 +570,7 @@ class Position:
             quantity=self.quantity,
             side=self.side,
             gross_pnl=gross_pnl,
-            brokerage=charges['brokerage'],
-            stt=charges['stt'],
-            exchange_charges=charges['exchange_charges'],
-            gst=charges['gst'],
-            sebi_charges=charges['sebi_charges'],
+            brokerage=total_brokerage,
             net_pnl=net_pnl,
             deployed_capital=self.deployed_capital,
             max_favorable_price=self.max_favorable_price,
@@ -692,197 +579,139 @@ class Position:
             stop_loss_hit=(exit_reason in ["STOP_LOSS_HIT", "EMERGENCY_EXIT"]),
             exit_reason=exit_reason,
             holding_duration_minutes=holding_duration,
-            roi_percentage=roi_percentage
+            roi_percentage=roi_percentage,
+            entry_order_id=self.entry_order_id or "",
+            exit_order_id=exit_order_id,
+            stop_order_ids=self.stop_order_ids
         )
         
-        # Log trade completion
         logger.info(f"{Fore.CYAN}TRADE COMPLETED: {self.trade_id}")
         logger.info(f"  Gross P&L: ₹{gross_pnl:.2f}")
-        logger.info(f"  Total Charges: ₹{charges['total_charges']:.2f}")
         logger.info(f"  Net P&L: ₹{net_pnl:.2f}")
-        logger.info(f"  ROI: {roi_percentage:.2f}%")
         logger.info(f"  Duration: {holding_duration:.1f} minutes{Style.RESET_ALL}")
-        
-        # Detailed trade log
-        trade_logger.info(f"TRADE_COMPLETED: {json.dumps(trade_report.to_dict(), default=str, indent=2)}")
         
         return trade_report
 
 
-class ImprovedProbabilityEngine:
-    """Probability engine for options analysis"""
+class OrderRecorder:
+    """Records all orders instead of placing them"""
     
-    def __init__(self, spot: float, strike: float, tte: float, rate: float, iv: float):
-        self.S = spot
-        self.K = strike
-        self.T = max(tte, 0.001)
-        self.r = rate
-        self.σ = iv
-        self.skew = self._calculate_skew()
-        self._update_greeks()
+    def __init__(self):
+        self.orders: List[RecordedOrder] = []
+        self.order_count = 0
     
-    def _calculate_skew(self) -> float:
-        """Calculate implied skew based on moneyness"""
-        moneyness = self.S / self.K
-        if moneyness > 1.02:
-            return -0.3
-        elif moneyness < 0.98:
-            return 0.3
-        else:
-            return 0
+    def record_order(self, order: RecordedOrder):
+        """Record an order"""
+        self.orders.append(order)
+        self.order_count += 1
+        
+        # Log to order logger
+        order_logger.info(f"ORDER_RECORDED: {json.dumps(order.to_dict(), default=str, indent=2)}")
+        
+        # Log to main logger
+        logger.info(f"📝 ORDER #{self.order_count}: {order.transaction_type} {order.quantity} {order.symbol} @ ₹{order.price:.2f}")
     
-    def _update_greeks(self):
-        """Calculate Greeks with skew adjustment"""
-        d1 = (np.log(self.S / self.K) + (self.r + 0.5 * self.σ**2) * self.T) / (self.σ * np.sqrt(self.T))
-        d2 = d1 - self.σ * np.sqrt(self.T)
-        
-        skew_adjustment = self.skew * np.sqrt(self.T)
-        d1_adj = d1 + skew_adjustment
-        d2_adj = d2 + skew_adjustment
-        
-        self.delta = norm.cdf(d1_adj)
-        self.gamma = norm.pdf(d1_adj) / (self.S * self.σ * np.sqrt(self.T))
-        self.vega = self.S * norm.pdf(d1_adj) * np.sqrt(self.T) / 100
-        self.theta = -(self.S * norm.pdf(d1_adj) * self.σ) / (2 * np.sqrt(self.T)) / 365
-    
-    def get_confidence_zones(self, confidence_levels=[0.68, 0.95]) -> Dict:
-        """Get confidence zones for price prediction"""
-        try:
-            center_price = self.S
-            daily_volatility = self.σ / np.sqrt(252)
-            time_adjusted_vol = daily_volatility * np.sqrt(max(self.T * 252, 1))
-            
-            zones = {}
-            for conf in confidence_levels:
-                z_score = norm.ppf((1 + conf) / 2)
-                price_range = center_price * time_adjusted_vol * z_score
-                min_range = center_price * 0.005
-                price_range = max(price_range, min_range)
-                
-                if self.T < 0.1:
-                    max_range = center_price * 0.05
-                    price_range = min(price_range, max_range)
-                
-                lower_bound = max(center_price - price_range, center_price * 0.8)
-                upper_bound = min(center_price + price_range, center_price * 1.2)
-                
-                zones[conf] = {
-                    'lower': lower_bound,
-                    'upper': upper_bound,
-                    'peak': center_price,
-                    'width': upper_bound - lower_bound,
-                }
-            
-            return zones
-            
-        except Exception as e:
-            logger.error(f"Error calculating confidence zones: {e}")
-            return {
-                0.68: {'lower': self.S * 0.98, 'upper': self.S * 1.02, 'peak': self.S, 'width': self.S * 0.04},
-                0.95: {'lower': self.S * 0.95, 'upper': self.S * 1.05, 'peak': self.S, 'width': self.S * 0.10},
-            }
-
-
-class TrendAnalyzer:
-    """Trend analysis for market direction"""
-    
-    def __init__(self, lookback_periods=50):
-        self.price_history = deque(maxlen=lookback_periods)
-        self.volume_history = deque(maxlen=lookback_periods)
-    
-    def update(self, price: float, volume: int):
-        """Update price and volume history"""
-        self.price_history.append(price)
-        self.volume_history.append(volume)
-    
-    def get_trend_signal(self) -> Dict:
-        """Get trend signal for trading"""
-        if len(self.price_history) < 20:
-            return {'trend': 'NEUTRAL', 'strength': 0, 'vwap': 0}
-        
-        prices = np.array(self.price_history)
-        volumes = np.array(self.volume_history)
-        
-        # VWAP calculation
-        vwap = np.sum(prices * volumes) / np.sum(volumes) if np.sum(volumes) > 0 else prices[-1]
-        
-        # Trend calculation
-        x = np.arange(len(prices))
-        slope = np.polyfit(x, prices, 1)[0]
-        price_std = np.std(prices)
-        strength = abs(slope) / price_std if price_std > 0 else 0
-        
-        # Determine trend direction
-        if slope > price_std * 0.01:
-            trend = 'BULLISH'
-        elif slope < -price_std * 0.01:
-            trend = 'BEARISH'
-        else:
-            trend = 'NEUTRAL'
-        
-        # Volume analysis
-        recent_volume = np.mean(volumes[-5:])
-        avg_volume = np.mean(volumes[:-5]) if len(volumes) > 5 else recent_volume
-        volume_ratio = recent_volume / avg_volume if avg_volume > 0 else 1
-        
-        # Adjust strength based on volume
-        if volume_ratio > 1.2:
-            strength *= 1.5
-        elif volume_ratio < 0.8:
-            strength *= 0.5
+    def get_orders_summary(self) -> Dict:
+        """Get summary of all recorded orders"""
+        entry_orders = [o for o in self.orders if o.transaction_type == "BUY"]
+        exit_orders = [o for o in self.orders if o.transaction_type == "SELL" and o.order_type != "SL"]
+        stop_orders = [o for o in self.orders if o.order_type == "SL"]
+        cancel_orders = [o for o in self.orders if o.transaction_type == "CANCEL"]
         
         return {
-            'trend': trend,
-            'strength': min(1.0, strength),
-            'vwap': vwap,
-            'current_vs_vwap': (prices[-1] - vwap) / vwap,
-            'volume_ratio': volume_ratio,
+            'total_orders': len(self.orders),
+            'entry_orders': len(entry_orders),
+            'exit_orders': len(exit_orders),
+            'stop_orders': len(stop_orders),
+            'cancel_orders': len(cancel_orders),
+            'orders': [o.to_dict() for o in self.orders]
+        }
+
+
+class TradingMetrics:
+    """Trading performance metrics"""
+    def __init__(self):
+        self.trades: List[TradeReport] = []
+        self.daily_pnl = 0
+        self.total_brokerage = 0
+    
+    def add_trade(self, trade: TradeReport):
+        self.trades.append(trade)
+        self.daily_pnl += trade.net_pnl
+        self.total_brokerage += trade.brokerage
+    
+    def calculate_metrics(self) -> Dict:
+        if not self.trades:
+            return {
+                'total_trades': 0, 'winning_trades': 0, 'losing_trades': 0,
+                'win_rate': 0, 'profit_factor': 0, 'avg_winner': 0, 'avg_loser': 0,
+                'largest_winner': 0, 'largest_loser': 0, 'net_pnl': 0,
+                'gross_pnl': 0, 'total_costs': 0, 'roi': 0
+            }
+        
+        winning_trades = [t for t in self.trades if t.net_pnl > 0]
+        losing_trades = [t for t in self.trades if t.net_pnl <= 0]
+        
+        total_gross_profit = sum(t.gross_pnl for t in winning_trades)
+        total_gross_loss = abs(sum(t.gross_pnl for t in losing_trades))
+        
+        return {
+            'total_trades': len(self.trades),
+            'winning_trades': len(winning_trades),
+            'losing_trades': len(losing_trades),
+            'win_rate': len(winning_trades) / len(self.trades) * 100,
+            'profit_factor': total_gross_profit / total_gross_loss if total_gross_loss > 0 else float('inf'),
+            'avg_winner': sum(t.net_pnl for t in winning_trades) / len(winning_trades) if winning_trades else 0,
+            'avg_loser': sum(t.net_pnl for t in losing_trades) / len(losing_trades) if losing_trades else 0,
+            'largest_winner': max((t.net_pnl for t in winning_trades), default=0),
+            'largest_loser': min((t.net_pnl for t in losing_trades), default=0),
+            'net_pnl': self.daily_pnl,
+            'gross_pnl': sum(t.gross_pnl for t in self.trades),
+            'total_costs': self.total_brokerage,
+            'roi': (self.daily_pnl / TRADING_CAPITAL * 100) if TRADING_CAPITAL > 0 else 0
         }
 
 
 def is_market_hours() -> bool:
-    """Check if current time is within market hours (IST)"""
+    """Check if current time is within market hours"""
     now = datetime.now(IST)
     market_start = now.replace(
         hour=TradingConfig.MARKET_START_HOUR, 
         minute=TradingConfig.MARKET_START_MINUTE, 
-        second=0, 
-        microsecond=0
+        second=0, microsecond=0
     )
     market_end = now.replace(
         hour=TradingConfig.MARKET_END_HOUR, 
         minute=TradingConfig.MARKET_END_MINUTE, 
-        second=0, 
-        microsecond=0
+        second=0, microsecond=0
     )
-    
     return market_start <= now <= market_end
 
 
 def is_trading_day() -> bool:
-    """Check if today is a trading day (Monday-Friday, excluding holidays)"""
+    """Check if today is a trading day"""
     now = datetime.now(IST)
-    # Monday = 0, Sunday = 6
     return now.weekday() < 5  # Monday to Friday
 
 
 class NIFTYIntradayEngine:
-    """Main NIFTY Options Intraday Trading Engine"""
+    """Main NIFTY Options Trading Engine - Real-time Simulation Mode"""
     
     def __init__(self, capital: float):
         self.capital = capital
         self.available_capital = capital
         self.deployed_capital = 0
         
-        # Initialize Kite connection
-        self.kite = KiteConnect(api_key=API_KEY) if API_KEY else None
-        if self.kite and ACCESS_TOKEN:
+        # Initialize Kite connection for market data
+        self.kite = None
+        if API_KEY and ACCESS_TOKEN:
+            self.kite = KiteConnect(api_key=API_KEY)
             self.kite.set_access_token(ACCESS_TOKEN)
         
         # Trading state
         self.positions: Dict[str, Position] = {}
         self.trading_metrics = TradingMetrics()
-        self.probability_engines: Dict[str, ImprovedProbabilityEngine] = {}
+        self.order_recorder = OrderRecorder()
         self.trend_analyzer = TrendAnalyzer()
         
         # Market data
@@ -898,71 +727,30 @@ class NIFTYIntradayEngine:
         self.tick_count = 0
         self.last_display_time = 0
         
-        # Position tracking
-        self.last_position_sync = datetime.min
-        self.live_positions = {}
-        self.pending_orders = {}
-        self.margin_used = 0
-        
         # Performance tracking
         self.trades_today = 0
         self.last_trade_time = {}
         self.last_signal_time = {}
+        self.margin_used = 0
         
-        logger.info(f"{Fore.GREEN}NIFTY Engine Initialized{Style.RESET_ALL}")
+        logger.info(f"{Fore.GREEN}NIFTY Engine Initialized - REAL-TIME SIMULATION MODE{Style.RESET_ALL}")
         logger.info(f"Capital: ₹{capital:,.2f}")
-        logger.info(f"Mode: {'LIVE TRADING' if LIVE_TRADING_MODE else 'SIMULATION'}")
+        logger.info(f"API Connection: {'✓ Connected' if self.kite else '✗ No API'}")
         logger.info(f"Trailing: Start ₹{TradingConfig.TRAILING_START_THRESHOLD}, Increment ₹{TradingConfig.TRAILING_STOP_INCREMENT}")
         
-        if LIVE_TRADING_MODE:
-            print(f"\n{Fore.RED}{'='*80}{Style.RESET_ALL}")
-            print(f"{Fore.RED}⚠️  LIVE TRADING MODE ENABLED ⚠️{Style.RESET_ALL}")
-            print(f"{Fore.RED}REAL MONEY WILL BE USED!{Style.RESET_ALL}")
-            print(f"{Fore.RED}{'='*80}{Style.RESET_ALL}\n")
-        else:
-            print(f"\n{Fore.YELLOW}{'='*80}{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}🔧 SIMULATION MODE 🔧{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}{'='*80}{Style.RESET_ALL}\n")
-    
-    async def check_budget_and_margin(self, required_capital: float) -> bool:
-        """Check if sufficient capital is available"""
-        try:
-            if not LIVE_TRADING_MODE:
-                return True
-            
-            if not self.kite:
-                logger.error("Kite connection not available")
-                return False
-            
-            margins = self.kite.margins()
-            available_cash = margins.get('equity', {}).get('available', {}).get('cash', 0)
-            
-            pending_allocation = sum(self.pending_orders.values())
-            capital_utilization = (self.margin_used + pending_allocation + required_capital) / self.capital
-            
-            if capital_utilization > TradingConfig.MAX_CAPITAL_UTILIZATION:
-                logger.warning(f"{Fore.YELLOW}CAPITAL LIMIT: Would use {capital_utilization:.1%}{Style.RESET_ALL}")
-                return False
-            
-            effective_available = available_cash - pending_allocation
-            if effective_available < required_capital:
-                logger.warning(f"{Fore.YELLOW}INSUFFICIENT CASH: Need ₹{required_capital:,.2f}, Have ₹{effective_available:,.2f}{Style.RESET_ALL}")
-                return False
-            
-            logger.info(f"{Fore.GREEN}BUDGET CHECK PASSED: Using {capital_utilization:.1%} of capital{Style.RESET_ALL}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error checking budget: {e}")
-            return False
+        print(f"\n{Fore.YELLOW}{'='*80}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}🔧 REAL-TIME SIMULATION MODE 🔧{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Using live market data to test trading logic{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}All orders will be recorded, not executed{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}{'='*80}{Style.RESET_ALL}\n")
     
     def is_in_focus_mode(self) -> bool:
-        """Check if in focus mode (high capital utilization)"""
+        """Check if in focus mode"""
         capital_utilization = self.margin_used / self.capital if self.capital > 0 else 0
         return capital_utilization >= TradingConfig.FOCUS_MODE_THRESHOLD
     
     def calculate_position_size_enhanced(self, confidence: float, entry_price: float) -> Tuple[int, float]:
-        """Calculate position size based on confidence and available capital"""
+        """Calculate position size"""
         try:
             available_for_trading = self.capital * TradingConfig.MAX_CAPITAL_UTILIZATION - self.margin_used
             
@@ -1006,104 +794,44 @@ class NIFTYIntradayEngine:
     
     def calculate_expected_profit(self, entry_price: float, quantity: int, 
                                 target_price: float, stop_price: float) -> Dict:
-        """Calculate expected profit with all charges"""
+        """Calculate expected profit with charges"""
+        num_lots = quantity / TradingConfig.LOT_SIZE
         
-        # Create temporary position for charge calculation
-        temp_charges_target = Position.calculate_all_charges(
-            None, entry_price, target_price, quantity
-        )
-        temp_charges_stop = Position.calculate_all_charges(
-            None, entry_price, stop_price, quantity
-        )
+        profit_per_lot = abs(target_price - entry_price) * TradingConfig.LOT_SIZE
+        loss_per_lot = abs(entry_price - stop_price) * TradingConfig.LOT_SIZE
+        brokerage_per_lot = TradingConfig.BROKERAGE_PER_LOT * 2
         
-        gross_profit = abs(target_price - entry_price) * quantity
-        gross_loss = abs(entry_price - stop_price) * quantity
+        net_profit_per_lot = profit_per_lot - brokerage_per_lot
+        net_loss_per_lot = loss_per_lot + brokerage_per_lot
         
-        net_profit = gross_profit - temp_charges_target['total_charges']
-        net_loss = gross_loss + temp_charges_stop['total_charges']
+        total_net_profit_potential = net_profit_per_lot * num_lots
+        total_net_loss_potential = net_loss_per_lot * num_lots
         
-        risk_reward = net_profit / net_loss if net_loss > 0 else 0
+        risk_reward = net_profit_per_lot / net_loss_per_lot if net_loss_per_lot > 0 else 0
+        
+        min_price_movement_required = (TradingConfig.MIN_PROFIT_AFTER_BROKERAGE + brokerage_per_lot) / TradingConfig.LOT_SIZE
+        actual_price_movement = abs(target_price - entry_price)
         
         is_worth_trading = (
-            net_profit >= TradingConfig.MIN_PROFIT_AFTER_BROKERAGE and
-            risk_reward >= TradingConfig.MIN_RISK_REWARD_RATIO
+            net_profit_per_lot >= TradingConfig.MIN_PROFIT_AFTER_BROKERAGE and
+            risk_reward >= TradingConfig.MIN_RISK_REWARD_RATIO and
+            actual_price_movement >= min_price_movement_required
         )
         
         return {
-            'net_profit': net_profit,
-            'net_loss': net_loss,
+            'net_profit_per_lot': net_profit_per_lot,
+            'net_loss_per_lot': net_loss_per_lot,
+            'total_net_profit_potential': total_net_profit_potential,
+            'total_net_loss_potential': total_net_loss_potential,
             'risk_reward_ratio': risk_reward,
-            'total_charges_profit': temp_charges_target['total_charges'],
-            'total_charges_loss': temp_charges_stop['total_charges'],
+            'brokerage_per_lot': brokerage_per_lot,
+            'min_price_movement_required': min_price_movement_required,
+            'actual_price_movement': actual_price_movement,
             'is_worth_trading': is_worth_trading,
         }
     
-    async def verify_position_created(self, symbol: str, expected_quantity: int, timeout_seconds: int = 30) -> bool:
-        """Verify position creation after order placement"""
-        try:
-            if not LIVE_TRADING_MODE or not self.kite:
-                return True
-            
-            start_time = time.time()
-            while time.time() - start_time < timeout_seconds:
-                try:
-                    positions = self.kite.positions()
-                    
-                    for pos in positions.get('net', []):
-                        if (pos['tradingsymbol'] == symbol and 
-                            abs(pos['quantity']) == expected_quantity):
-                            logger.info(f"{Fore.GREEN}✅ POSITION VERIFIED: {symbol} Qty={pos['quantity']}{Style.RESET_ALL}")
-                            return True
-                    
-                    await asyncio.sleep(2)
-                    
-                except Exception as pos_error:
-                    logger.warning(f"Error checking positions: {pos_error}")
-                    await asyncio.sleep(2)
-            
-            logger.error(f"{Fore.RED}❌ POSITION NOT VERIFIED: {symbol} within {timeout_seconds}s{Style.RESET_ALL}")
-            return False
-            
-        except Exception as e:
-            logger.error(f"Error verifying position: {e}")
-            return False
-    
-    async def sync_positions_with_broker(self):
-        """Sync positions with broker"""
-        try:
-            if not LIVE_TRADING_MODE or not self.kite:
-                return
-            
-            current_time = datetime.now()
-            if current_time - self.last_position_sync < timedelta(minutes=1):
-                return
-            
-            self.last_position_sync = current_time
-            
-            broker_positions = self.kite.positions()
-            nifty_positions = []
-            
-            for pos in broker_positions.get('net', []):
-                if pos['tradingsymbol'].startswith('NIFTY') and pos['quantity'] != 0:
-                    nifty_positions.append(pos)
-            
-            self.live_positions = {pos['tradingsymbol']: pos for pos in nifty_positions}
-            
-            self.deployed_capital = sum(
-                abs(pos.get('quantity', 0)) * pos.get('last_price', 0)
-                for pos in nifty_positions
-            )
-            
-            self.margin_used = sum(
-                abs(pos.get('quantity', 0)) * pos.get('average_price', 0)
-                for pos in nifty_positions
-            )
-            
-        except Exception as e:
-            logger.error(f"Error syncing positions: {e}")
-    
     def get_tradeable_strikes(self) -> List[Dict]:
-        """Get tradeable option strikes"""
+        """Get tradeable option strikes using live data"""
         try:
             if not self.kite:
                 logger.error("Kite connection not available")
@@ -1169,13 +897,26 @@ class NIFTYIntradayEngine:
     async def execute_trade(self, symbol: str, token: int, side: str, quantity: int, 
                           price: float, target_price: float, stop_price: float, 
                           option_info: Dict, expected_profit: float, deployed_capital: float):
-        """Execute trade with comprehensive tracking"""
+        """Execute trade by recording orders"""
         try:
-            # Create temporary order ID for tracking
-            temp_order_id = f"temp_{int(time.time())}"
-            self.pending_orders[temp_order_id] = deployed_capital
+            # Record entry order
+            entry_order_id = f"ENTRY_{self.trades_today + 1}_{int(time.time())}"
+            entry_order = RecordedOrder(
+                order_id=entry_order_id,
+                timestamp=datetime.now(IST),
+                symbol=symbol,
+                transaction_type=side,
+                quantity=quantity,
+                order_type="LIMIT",
+                price=price,
+                status="EXECUTED",
+                execution_price=price,
+                execution_time=datetime.now(IST),
+                reason="Entry order"
+            )
+            self.order_recorder.record_order(entry_order)
             
-            # Create position object
+            # Create position
             position = Position(
                 symbol=symbol,
                 side=side,
@@ -1186,84 +927,37 @@ class NIFTYIntradayEngine:
                 strike=option_info['strike'],
                 expected_profit=expected_profit,
                 deployed_capital=deployed_capital,
+                order_recorder=self.order_recorder
             )
             
-            # Setup stops
+            position.entry_order_id = entry_order_id
             position.update_stops(stop_price, target_price)
             
-            logger.info(f"{Fore.GREEN}EXECUTING TRADE:{Style.RESET_ALL}")
+            # Record initial stop loss order
+            trigger_price = position.round_price_for_order(stop_price, is_buy=False)
+            limit_price = trigger_price - 0.05
+            
+            stop_order_id = f"SL_{position.trade_id}_INITIAL"
+            stop_order = RecordedOrder(
+                order_id=stop_order_id,
+                timestamp=datetime.now(IST),
+                symbol=symbol,
+                transaction_type="SELL",
+                quantity=quantity,
+                order_type="SL",
+                price=limit_price,
+                trigger_price=trigger_price,
+                status="PLACED",
+                reason="Initial stop loss"
+            )
+            self.order_recorder.record_order(stop_order)
+            position.stop_order_ids.append(stop_order_id)
+            
+            logger.info(f"{Fore.GREEN}TRADE RECORDED:{Style.RESET_ALL}")
             logger.info(f"Symbol: {symbol}")
             logger.info(f"Entry: ₹{price:.2f} | Target: ₹{target_price:.2f} | Stop: ₹{stop_price:.2f}")
             logger.info(f"Quantity: {quantity} | Capital: ₹{deployed_capital:,.2f}")
-            
-            if LIVE_TRADING_MODE and self.kite:
-                try:
-                    # Place entry order
-                    actual_order_id = self.kite.place_order(
-                        variety="regular",
-                        exchange="NFO",
-                        tradingsymbol=symbol,
-                        transaction_type=side,
-                        quantity=quantity,
-                        product="MIS",
-                        order_type="LIMIT",
-                        price=price,
-                    )
-                    
-                    logger.info(f"{Fore.GREEN}✅ ENTRY ORDER PLACED: {actual_order_id}{Style.RESET_ALL}")
-                    position.order_id = actual_order_id
-                    
-                    # Wait for order execution
-                    await asyncio.sleep(2)
-                    
-                    # Verify position creation
-                    position_verified = await self.verify_position_created(symbol, quantity, timeout_seconds=10)
-                    
-                    if position_verified:
-                        position.is_position_verified = True
-                        position.order_status = "EXECUTED"
-                        
-                        # Place initial stop loss
-                        logger.info(f"{Fore.YELLOW}PLACING INITIAL STOP LOSS...{Style.RESET_ALL}")
-                        
-                        trigger_price = position.round_price_for_order(stop_price, is_buy=False)
-                        limit_price = trigger_price - 0.05
-                        
-                        try:
-                            stop_order_id = self.kite.place_order(
-                                variety="regular",
-                                exchange="NFO",
-                                tradingsymbol=symbol,
-                                transaction_type="SELL",
-                                quantity=quantity,
-                                product="MIS",
-                                order_type="SL",
-                                price=limit_price,
-                                trigger_price=trigger_price,
-                            )
-                            
-                            position.stop_loss_order_id = stop_order_id
-                            logger.info(f"{Fore.GREEN}✅ INITIAL STOP LOSS PLACED: {stop_order_id}{Style.RESET_ALL}")
-                            
-                        except Exception as stop_error:
-                            logger.error(f"{Fore.RED}❌ STOP LOSS FAILED: {stop_error}{Style.RESET_ALL}")
-                    
-                    else:
-                        logger.error(f"{Fore.RED}❌ ENTRY ORDER FAILED - Position not verified{Style.RESET_ALL}")
-                        position.order_status = "REJECTED"
-                        del self.pending_orders[temp_order_id]
-                        return
-                
-                except Exception as order_error:
-                    logger.error(f"{Fore.RED}❌ ORDER PLACEMENT FAILED: {order_error}{Style.RESET_ALL}")
-                    del self.pending_orders[temp_order_id]
-                    return
-            
-            else:
-                # Simulation mode
-                logger.info(f"{Fore.YELLOW}[SIMULATED] Trade executed{Style.RESET_ALL}")
-                position.is_position_verified = True
-                position.order_status = "EXECUTED"
+            logger.info(f"Orders: Entry {entry_order_id}, Stop {stop_order_id}")
             
             # Add to active positions
             self.positions[token] = position
@@ -1273,14 +967,11 @@ class NIFTYIntradayEngine:
             # Update capital tracking
             self.deployed_capital += deployed_capital
             self.margin_used += deployed_capital
-            del self.pending_orders[temp_order_id]
             
             logger.info(f"{Fore.GREEN}✅ TRADE SETUP COMPLETE: {symbol}{Style.RESET_ALL}")
             
         except Exception as e:
             logger.error(f"Trade execution failed: {e}")
-            if temp_order_id in self.pending_orders:
-                del self.pending_orders[temp_order_id]
     
     async def close_position(self, token: int, current_price: float, exit_reason: str = "UNKNOWN"):
         """Close position and generate report"""
@@ -1288,36 +979,6 @@ class NIFTYIntradayEngine:
             position = self.positions[token]
             
             logger.info(f"{Fore.YELLOW}CLOSING POSITION: {position.trade_id} - Reason: {exit_reason}{Style.RESET_ALL}")
-            
-            if LIVE_TRADING_MODE and self.kite:
-                exit_side = "SELL" if position.side == "BUY" else "BUY"
-                exit_price_rounded = self.round_price_for_order(current_price, is_buy=(exit_side == "BUY"))
-                
-                try:
-                    # Cancel stop loss order if exists
-                    if position.stop_loss_order_id:
-                        try:
-                            self.kite.cancel_order(variety="regular", order_id=position.stop_loss_order_id)
-                            logger.info(f"Cancelled stop loss order: {position.stop_loss_order_id}")
-                        except Exception as cancel_error:
-                            logger.warning(f"Could not cancel stop loss: {cancel_error}")
-                    
-                    # Place exit order
-                    exit_order_id = self.kite.place_order(
-                        variety="regular",
-                        exchange="NFO",
-                        tradingsymbol=position.symbol,
-                        transaction_type=exit_side,
-                        quantity=position.quantity,
-                        product="MIS",
-                        order_type="LIMIT",
-                        price=exit_price_rounded,
-                    )
-                    
-                    logger.info(f"{Fore.GREEN}✅ EXIT ORDER PLACED: {exit_order_id}{Style.RESET_ALL}")
-                    
-                except Exception as exit_error:
-                    logger.error(f"{Fore.RED}❌ EXIT ORDER FAILED: {exit_error}{Style.RESET_ALL}")
             
             # Generate trade report
             trade_report = position.close(current_price, datetime.now(IST), exit_reason)
@@ -1371,7 +1032,7 @@ class NIFTYIntradayEngine:
                         return
                     
                     # Update trailing stop
-                    position.update_trailing_stop(current_price, self.kite)
+                    position.update_trailing_stop(current_price)
                     
                     # Check normal exit conditions
                     exit_reason = None
@@ -1398,8 +1059,7 @@ class NIFTYIntradayEngine:
         try:
             token = tick.get('instrument_token')
             
-            if (token not in self.probability_engines or 
-                token not in self.monitored_options or 
+            if (token not in self.monitored_options or 
                 not is_market_hours()):
                 return
             
@@ -1426,8 +1086,6 @@ class NIFTYIntradayEngine:
     async def check_entry_signals_only(self, token: int, depth: MarketDepth):
         """Check for entry signals"""
         try:
-            await self.sync_positions_with_broker()
-            
             option_symbol = self.monitored_options[token]['symbol']
             last_trade = self.last_trade_time.get(token, datetime.min)
             last_signal = self.last_signal_time.get(token, datetime.min)
@@ -1486,7 +1144,7 @@ class NIFTYIntradayEngine:
                     entry_price_rounded = self.round_price_for_order(current_price, is_buy=True)
                     position_size, required_capital = self.calculate_position_size_enhanced(confidence, entry_price_rounded)
                     
-                    if position_size > 0 and await self.check_budget_and_margin(required_capital):
+                    if position_size > 0:
                         
                         # Calculate target and stop prices
                         target_price = current_price * 1.06
@@ -1506,7 +1164,7 @@ class NIFTYIntradayEngine:
                         )
                         
                         logger.info(f"{Fore.CYAN}TRADE ANALYSIS:{Style.RESET_ALL}")
-                        logger.info(f"  Net Profit Potential: ₹{trade_analysis['net_profit']:.2f}")
+                        logger.info(f"  Net Profit Potential: ₹{trade_analysis['total_net_profit_potential']:.2f}")
                         logger.info(f"  Risk/Reward Ratio: {trade_analysis['risk_reward_ratio']:.2f}")
                         logger.info(f"  Worth Trading: {trade_analysis['is_worth_trading']}")
                         
@@ -1521,7 +1179,7 @@ class NIFTYIntradayEngine:
                                 target_price=target_price_rounded,
                                 stop_price=stop_price_rounded,
                                 option_info=option_info,
-                                expected_profit=trade_analysis['net_profit'],
+                                expected_profit=trade_analysis['total_net_profit_potential'],
                                 deployed_capital=required_capital,
                             )
                         else:
@@ -1560,27 +1218,10 @@ class NIFTYIntradayEngine:
                     'expiry': opt['expiry_dt'],
                     'lot_size': opt['lot_size'],
                 }
-                
-                # Setup probability engine
-                days_to_expiry = max(1, (opt['expiry_dt'].date() - datetime.now().date()).days)
-                tte_years = days_to_expiry / 365
-                
-                moneyness = abs(opt['strike'] - self.spot_price) / self.spot_price
-                base_iv = 0.15
-                iv_adjustment = moneyness * 0.3
-                estimated_iv = base_iv + iv_adjustment
-                
-                self.probability_engines[opt['instrument_token']] = ImprovedProbabilityEngine(
-                    spot=self.spot_price,
-                    strike=opt['strike'],
-                    tte=tte_years,
-                    rate=0.065,
-                    iv=estimated_iv,
-                )
             
             tokens = [opt['instrument_token'] for opt in selected_options]
             
-            logger.info(f"Monitoring {len(tokens)} options for profit-based trailing")
+            logger.info(f"Monitoring {len(tokens)} options for real-time simulation")
             
             if not self.kite:
                 logger.error("Kite connection not available for streaming")
@@ -1596,7 +1237,7 @@ class NIFTYIntradayEngine:
             def on_connect(ws, response):
                 ws.subscribe(tokens)
                 ws.set_mode(ws.MODE_FULL, tokens)
-                logger.info(f"{Fore.GREEN}Connected to market data stream{Style.RESET_ALL}")
+                logger.info(f"{Fore.GREEN}Connected to real-time market data stream{Style.RESET_ALL}")
             
             def on_error(ws, code, reason):
                 logger.error(f"WebSocket error: {code} - {reason}")
@@ -1640,7 +1281,7 @@ class NIFTYIntradayEngine:
                     await self.process_entry_signals(tick)
                 
                 # Display updates
-                if tick_count % 50 == 0:
+                if tick_count % 100 == 0:
                     self.display_monitored_options()
                     
             except queue.Empty:
@@ -1655,7 +1296,7 @@ class NIFTYIntradayEngine:
             return
         
         current_time = time.time()
-        if current_time - self.last_display_time < 5:
+        if current_time - self.last_display_time < 10:  # Update every 10 seconds
             return
         
         self.last_display_time = current_time
@@ -1664,10 +1305,7 @@ class NIFTYIntradayEngine:
         capital_utilization = self.margin_used / self.capital if self.capital > 0 else 0
         
         print(f"\n{Fore.YELLOW}{'='*80}{Style.RESET_ALL}")
-        if focus_mode:
-            print(f"{Fore.RED}🎯 FOCUS MODE - Managing Existing Trades Only ({capital_utilization:.1%} capital used){Style.RESET_ALL}")
-        else:
-            print(f"{Fore.YELLOW}PROFIT-BASED TRAILING OPTIONS - {datetime.now(IST).strftime('%H:%M:%S')}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}REAL-TIME SIMULATION - {datetime.now(IST).strftime('%H:%M:%S')}{Style.RESET_ALL}")
         print(f"{Fore.YELLOW}{'='*80}{Style.RESET_ALL}")
         
         table_data = []
@@ -1695,12 +1333,10 @@ class NIFTYIntradayEngine:
                     status_parts.append("🔒 TRAIL")
                 if position.target_removed:
                     status_parts.append("🎯 NO-TARGET")
-                if position.original_stop_reinforced:
-                    status_parts.append("⚠️ REINF")
                 
                 position_status = " ".join(status_parts)
             else:
-                position_status = "⚪" if not focus_mode else "🎯 FOCUS"
+                position_status = "⚪ MONITORING"
             
             table_data.append([
                 f"{strike} {option_type}",
@@ -1716,24 +1352,26 @@ class NIFTYIntradayEngine:
         print(tabulate(table_data, headers=headers, tablefmt="grid"))
         
         # Performance summary
-        available_capital = self.capital * TradingConfig.MAX_CAPITAL_UTILIZATION - self.margin_used
         metrics = self.trading_metrics.calculate_metrics()
+        orders_summary = self.order_recorder.get_orders_summary()
         
         print(f"{Fore.CYAN}Capital: ₹{self.capital + metrics['net_pnl']:,.2f} | P&L: ₹{metrics['net_pnl']:,.2f} | Win Rate: {metrics['win_rate']:.1f}%{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}Used: ₹{self.margin_used:,.2f} ({capital_utilization:.1%}) | Available: ₹{available_capital:,.2f} | Focus: {'YES' if focus_mode else 'NO'}{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}Positions: {len(self.positions)} | Trades: {metrics['total_trades']} | Rejected: 0{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}Positions: {len(self.positions)} | Trades: {metrics['total_trades']} | Orders Recorded: {orders_summary['total_orders']}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}Ticks Processed: {self.tick_count:,} | Focus Mode: {'YES' if focus_mode else 'NO'}{Style.RESET_ALL}")
     
     async def generate_daily_report(self):
         """Generate comprehensive daily report"""
         try:
             metrics = self.trading_metrics.calculate_metrics()
+            orders_summary = self.order_recorder.get_orders_summary()
             today = datetime.now(IST).strftime('%Y-%m-%d')
             
             # Create report content
             report_content = f"""
-# NIFTY Options Trading Daily Report
+# NIFTY Options Trading Simulation Report
 Date: {today}
 Generated: {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')}
+Mode: Real-time Simulation using Live Market Data
 
 ## Trading Summary
 - **Total Trades**: {metrics['total_trades']}
@@ -1742,7 +1380,7 @@ Generated: {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')}
 - **Win Rate**: {metrics['win_rate']:.2f}%
 - **Profit Factor**: {metrics['profit_factor']:.2f}
 
-## Financial Performance
+## Financial Performance (Simulated)
 - **Net P&L**: ₹{metrics['net_pnl']:,.2f}
 - **Gross P&L**: ₹{metrics['gross_pnl']:,.2f}
 - **Total Costs**: ₹{metrics['total_costs']:,.2f}
@@ -1752,13 +1390,25 @@ Generated: {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')}
 - **Largest Winner**: ₹{metrics['largest_winner']:,.2f}
 - **Largest Loser**: ₹{metrics['largest_loser']:,.2f}
 
+## Order Summary
+- **Total Orders Recorded**: {orders_summary['total_orders']}
+- **Entry Orders**: {orders_summary['entry_orders']}
+- **Exit Orders**: {orders_summary['exit_orders']}
+- **Stop Loss Orders**: {orders_summary['stop_orders']}
+- **Cancel Orders**: {orders_summary['cancel_orders']}
+
 ## Trading Configuration
 - **Capital**: ₹{self.capital:,.2f}
-- **Mode**: {'LIVE TRADING' if LIVE_TRADING_MODE else 'SIMULATION'}
+- **Mode**: Real-time Simulation
 - **Trailing Start**: ₹{TradingConfig.TRAILING_START_THRESHOLD}
 - **Trailing Increment**: ₹{TradingConfig.TRAILING_STOP_INCREMENT}
 - **Max Capital Utilization**: {TradingConfig.MAX_CAPITAL_UTILIZATION:.1%}
 - **Stop Loss**: {TradingConfig.STOP_LOSS_PERCENTAGE:.1%} of deployed capital
+
+## Market Data Source
+- **Live Data**: KiteConnect API
+- **Ticks Processed**: {self.tick_count:,}
+- **Options Monitored**: {len(self.monitored_options)}
 
 ## Individual Trades
 """
@@ -1774,36 +1424,44 @@ Generated: {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')}
 - **Quantity**: {trade.quantity}
 - **Deployed Capital**: ₹{trade.deployed_capital:,.2f}
 - **Gross P&L**: ₹{trade.gross_pnl:.2f}
-- **Costs**: ₹{trade.brokerage + trade.stt + trade.exchange_charges + trade.gst + trade.sebi_charges:.2f}
 - **Net P&L**: ₹{trade.net_pnl:.2f}
 - **ROI**: {trade.roi_percentage:.2f}%
 - **Duration**: {trade.holding_duration_minutes:.1f} minutes
 - **Exit Reason**: {trade.exit_reason}
 - **Trailing Used**: {'Yes' if trade.trailing_activated else 'No'}
+- **Entry Order**: {trade.entry_order_id}
+- **Exit Order**: {trade.exit_order_id}
+- **Stop Orders**: {', '.join(trade.stop_order_ids)}
 """
             
             # Save report
-            report_file = REPORTS_DIR / f"daily_report_{today}.md"
+            report_file = REPORTS_DIR / f"simulation_report_{today}.md"
             with open(report_file, 'w', encoding='utf-8') as f:
                 f.write(report_content)
             
-            logger.info(f"{Fore.GREEN}Daily report generated: {report_file}{Style.RESET_ALL}")
+            logger.info(f"{Fore.GREEN}Simulation report generated: {report_file}{Style.RESET_ALL}")
             
-            # Also save as JSON for programmatic access
+            # Also save as JSON
             json_report = {
                 'date': today,
                 'generated': datetime.now(IST).isoformat(),
+                'mode': 'real_time_simulation',
                 'metrics': metrics,
+                'orders_summary': orders_summary,
                 'trades': [trade.to_dict() for trade in self.trading_metrics.trades],
                 'config': {
                     'capital': self.capital,
-                    'live_mode': LIVE_TRADING_MODE,
                     'trailing_start': TradingConfig.TRAILING_START_THRESHOLD,
                     'trailing_increment': TradingConfig.TRAILING_STOP_INCREMENT,
+                },
+                'market_data': {
+                    'ticks_processed': self.tick_count,
+                    'options_monitored': len(self.monitored_options),
+                    'api_used': 'KiteConnect'
                 }
             }
             
-            json_file = REPORTS_DIR / f"daily_report_{today}.json"
+            json_file = REPORTS_DIR / f"simulation_report_{today}.json"
             with open(json_file, 'w', encoding='utf-8') as f:
                 json.dump(json_report, f, indent=2, default=str)
             
@@ -1811,22 +1469,23 @@ Generated: {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')}
             logger.error(f"Error generating daily report: {e}")
     
     async def performance_monitor(self):
-        """Monitor performance and generate periodic reports"""
+        """Monitor performance during trading session"""
         while self.is_running:
             try:
                 await asyncio.sleep(300)  # 5 minutes
-                await self.sync_positions_with_broker()
                 
                 metrics = self.trading_metrics.calculate_metrics()
+                orders_summary = self.order_recorder.get_orders_summary()
                 current_capital = self.capital + metrics['net_pnl']
                 returns = metrics['roi']
                 
-                print(f"\n{Fore.CYAN}=== PERFORMANCE UPDATE ==={Style.RESET_ALL}")
+                print(f"\n{Fore.CYAN}=== SIMULATION PERFORMANCE UPDATE ==={Style.RESET_ALL}")
                 print(f"Capital: ₹{current_capital:,.2f} ({returns:+.2f}%)")
                 print(f"P&L: ₹{metrics['net_pnl']:,.2f}")
                 print(f"Positions: {len(self.positions)}")
+                print(f"Orders Recorded: {orders_summary['total_orders']}")
                 print(f"Win Rate: {metrics['win_rate']:.1f}%")
-                print(f"Profit Factor: {metrics['profit_factor']:.2f}")
+                print(f"Ticks Processed: {self.tick_count:,}")
                 
             except Exception as e:
                 logger.error(f"Performance monitor error: {e}")
@@ -1834,18 +1493,17 @@ Generated: {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')}
     async def start(self):
         """Start the trading engine"""
         try:
-            # For simulation mode or non-market hours, run for limited time for testing
-            if not LIVE_TRADING_MODE or not is_market_hours():
-                logger.info("Running in test mode - will exit after 30 seconds for demo")
-                self.is_running = True
-                
-                # Simulate some trading data for testing
-                await asyncio.sleep(30)
-                await self.shutdown()
+            if not API_KEY or not ACCESS_TOKEN:
+                logger.error("API credentials not available. Cannot use live market data.")
                 return
             
             self.is_running = True
-            logger.info("Starting NIFTY Options Trading Engine...")
+            logger.info("Starting Real-time Simulation Trading Engine...")
+            
+            if is_market_hours():
+                logger.info("📈 Market is open - running live simulation")
+            else:
+                logger.info("🕐 Market is closed - will wait for market hours or exit after demo")
             
             tasks = [
                 self.stream_market_data(),
@@ -1876,12 +1534,15 @@ Generated: {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')}
         
         # Final summary
         metrics = self.trading_metrics.calculate_metrics()
-        print(f"\n{Fore.YELLOW}=== FINAL TRADING SUMMARY ==={Style.RESET_ALL}")
+        orders_summary = self.order_recorder.get_orders_summary()
+        
+        print(f"\n{Fore.YELLOW}=== FINAL SIMULATION SUMMARY ==={Style.RESET_ALL}")
         print(f"Total Trades: {metrics['total_trades']}")
         print(f"Win Rate: {metrics['win_rate']:.1f}%")
         print(f"Net P&L: ₹{metrics['net_pnl']:,.2f}")
         print(f"ROI: {metrics['roi']:.2f}%")
-        print(f"Profit Factor: {metrics['profit_factor']:.2f}")
+        print(f"Orders Recorded: {orders_summary['total_orders']}")
+        print(f"Ticks Processed: {self.tick_count:,}")
         
         logger.info("Trading engine shutdown complete")
 
@@ -1892,56 +1553,20 @@ def signal_handler(signum, frame):
     sys.exit(0)
 
 
-def schedule_trading():
-    """Schedule trading for market hours"""
-    
-    def start_trading_job():
-        """Job to start trading"""
-        if is_trading_day() and is_market_hours():
-            logger.info("Starting scheduled trading session...")
-            asyncio.run(main_trading_loop())
-        else:
-            logger.info("Not a trading day or outside market hours")
-    
-    # Schedule trading start at 9:15 AM IST
-    schedule.every().monday.at("09:15").do(start_trading_job)
-    schedule.every().tuesday.at("09:15").do(start_trading_job)
-    schedule.every().wednesday.at("09:15").do(start_trading_job)
-    schedule.every().thursday.at("09:15").do(start_trading_job)
-    schedule.every().friday.at("09:15").do(start_trading_job)
-    
-    logger.info("Trading scheduled for weekdays at 9:15 AM IST")
-    
-    while True:
-        schedule.run_pending()
-        time.sleep(60)  # Check every minute
-
-
 async def main_trading_loop():
     """Main trading loop"""
     try:
-        # Validate environment
-        if not API_KEY or not ACCESS_TOKEN:
-            logger.error("Missing required environment variables: API_KEY or ACCESS_TOKEN")
-            print("\nRequired Environment Variables:")
-            print("- API_KEY: Your Kite Connect API key")
-            print("- ACCESS_TOKEN: Your Kite Connect access token")
-            print("- TRADING_CAPITAL: Trading capital amount (default: 10000)")
-            print("- LIVE_TRADING_MODE: true/false (default: false)")
-            print("- LOG_LEVEL: DEBUG/INFO/WARNING/ERROR (default: INFO)")
-            return
-        
         # Display startup banner
         print(f"""
 {Fore.CYAN}╔══════════════════════════════════════════════════════════╗
-║         NIFTY OPTIONS TRADING SYSTEM v2.0               ║
-║          Profit-Based Trailing Stops                    ║
+║         NIFTY OPTIONS REAL-TIME SIMULATION               ║
+║          Live Market Data + Order Recording              ║
 ║          ₹{TradingConfig.TRAILING_START_THRESHOLD} Start | ₹{TradingConfig.TRAILING_STOP_INCREMENT} Increments                     ║
 ╚══════════════════════════════════════════════════════════╝{Style.RESET_ALL}
         """)
         
         logger.info(f"Trading Capital: ₹{TRADING_CAPITAL:,.2f}")
-        logger.info(f"Mode: {'LIVE TRADING' if LIVE_TRADING_MODE else 'SIMULATION'}")
+        logger.info(f"Mode: REAL-TIME SIMULATION")
         logger.info(f"Market Hours: {TradingConfig.MARKET_START_HOUR}:{TradingConfig.MARKET_START_MINUTE:02d} - {TradingConfig.MARKET_END_HOUR}:{TradingConfig.MARKET_END_MINUTE:02d} IST")
         
         # Create and start engine
@@ -1962,28 +1587,28 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     
     print(f"""
-{Fore.GREEN}NIFTY Options Trading System{Style.RESET_ALL}
+{Fore.GREEN}NIFTY Options Real-time Simulation System{Style.RESET_ALL}
 {'='*50}
 
 Environment Configuration:
 - API Key: {'✓ Set' if API_KEY else '✗ Missing'}
 - Access Token: {'✓ Set' if ACCESS_TOKEN else '✗ Missing'}
 - Trading Capital: ₹{TRADING_CAPITAL:,.2f}
-- Live Trading: {'✓ Enabled' if LIVE_TRADING_MODE else '✗ Disabled (Simulation)'}
+- Mode: Real-time Simulation
 - Log Level: {LOG_LEVEL}
+
+Features:
+- Live market data from KiteConnect API
+- Order recording instead of execution
+- Full profit-based trailing logic testing
+- Comprehensive reporting
 
 Market Hours: {TradingConfig.MARKET_START_HOUR}:{TradingConfig.MARKET_START_MINUTE:02d} - {TradingConfig.MARKET_END_HOUR}:{TradingConfig.MARKET_END_MINUTE:02d} IST
     """)
     
     try:
-        if len(sys.argv) > 1 and sys.argv[1] == '--schedule':
-            # Run in scheduled mode
-            logger.info("Starting in scheduled mode...")
-            schedule_trading()
-        else:
-            # Run immediately
-            logger.info("Starting trading immediately...")
-            asyncio.run(main_trading_loop())
+        logger.info("Starting real-time simulation immediately...")
+        asyncio.run(main_trading_loop())
                 
     except KeyboardInterrupt:
         logger.info("Program interrupted by user")
